@@ -22,6 +22,9 @@ function lockLabel(user) {
   if (user.locked_until) return `Locked until ${fmtDate(user.locked_until)}`;
   return "";
 }
+function id() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
 
 const COUNTRIES = [
   "United States", "United Kingdom", "Canada", "Australia", "Ireland", "New Zealand",
@@ -37,6 +40,49 @@ const COUNTRIES = [
 
 const DEFAULT_SETTINGS = { site_name: "Double.net", tagline: "Updates from the top, conversation from everyone verified.", banner_url: null, banner_position_y: 50 };
 
+const ACCENT_COLORS = {
+  gold: { label: "Gold", accent: "#A8752C", soft: "#F3E8D2" },
+  moss: { label: "Moss", accent: "#4B7A5B", soft: "#E3EEE6" },
+  terracotta: { label: "Terracotta", accent: "#B4553F", soft: "#F5E4DF" },
+  slate: { label: "Slate", accent: "#4A5C7A", soft: "#E2E7EE" },
+  rose: { label: "Rose", accent: "#A34A6B", soft: "#F3E1E8" },
+};
+const REACTION_EMOJIS = ["👍", "❤️", "😂", "🔥", "😮"];
+
+function accentStyle(user) {
+  const c = ACCENT_COLORS[user?.accent_color] || ACCENT_COLORS.gold;
+  return { "--gold": c.accent, "--gold-soft": c.soft };
+}
+
+// Renders text with @username mentions highlighted, when the username
+// actually matches someone on the site.
+function MentionText({ text, profiles }) {
+  if (!text) return null;
+  const known = new Set(profiles.map((p) => p.username.toLowerCase()));
+  const parts = text.split(/(@\w+)/g);
+  return (
+    <>
+      {parts.map((part, i) => {
+        if (part.startsWith("@") && known.has(part.slice(1).toLowerCase())) {
+          return <span key={i} className="ch-mention">{part}</span>;
+        }
+        return <span key={i}>{part}</span>;
+      })}
+    </>
+  );
+}
+
+function computeBadges(user, messageCount) {
+  const badges = [];
+  if (user.is_admin) badges.push({ icon: "👑", label: "Creator" });
+  if (messageCount >= 1) badges.push({ icon: "💬", label: "First message" });
+  if (messageCount >= 10) badges.push({ icon: "🗣️", label: "Regular" });
+  if (Date.now() - new Date(user.created_at).getTime() > 30 * 24 * 60 * 60 * 1000) {
+    badges.push({ icon: "📅", label: "Been here a while" });
+  }
+  return badges;
+}
+
 function Avatar({ user, size = "md" }) {
   const initial = (user?.username || "?").slice(0, 1).toUpperCase();
   return (
@@ -49,14 +95,17 @@ function Avatar({ user, size = "md" }) {
 export default function App() {
   const [ready, setReady] = useState(false);
   const [needsSetup, setNeedsSetup] = useState(false);
-  const [me, setMe] = useState(null); // my profile row, or null if logged out
-  const [profiles, setProfiles] = useState([]); // everyone, for People/lookups
+  const [me, setMe] = useState(null);
+  const [profiles, setProfiles] = useState([]);
   const [officialPosts, setOfficialPosts] = useState([]);
+  const [postComments, setPostComments] = useState({}); // post_id -> [comment,...]
   const [forums, setForums] = useState([]);
+  const [trendingForumId, setTrendingForumId] = useState(null);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [view, setView] = useState("home");
   const [activeForumId, setActiveForumId] = useState(null);
   const [activeForumMessages, setActiveForumMessages] = useState([]);
+  const [activeForumPolls, setActiveForumPolls] = useState([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [activityTarget, setActivityTarget] = useState(null);
@@ -64,8 +113,7 @@ export default function App() {
   const [activityLoading, setActivityLoading] = useState(false);
   const [personId, setPersonId] = useState(null);
   const [flags, setFlags] = useState([]);
-
-  const profileById = (id) => profiles.find((p) => p.id === id) || null;
+  const [friendships, setFriendships] = useState([]); // all rows involving me
 
   async function loadMe(userId) {
     const { data } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();
@@ -78,52 +126,77 @@ export default function App() {
   }
 
   async function loadAll() {
-    const [{ data: settingsRow }, { data: forumsRows }, { data: postsRows }, { data: profileRows }, { count: adminCount }] =
+    const [{ data: settingsRow }, { data: forumsRows }, { data: postsRows }, { data: profileRows }, { count: adminCount }, { data: commentsRows }] =
       await Promise.all([
         supabase.from("settings").select("*").eq("id", 1).maybeSingle(),
         supabase.from("forums").select("*").order("created_at"),
-        supabase
-          .from("official_posts")
-          .select("*, author:profiles(username, avatar_url)")
-          .order("created_at", { ascending: false }),
+        supabase.from("official_posts").select("*, author:profiles(username, avatar_url)").order("created_at", { ascending: false }),
         supabase.from("profiles").select("*").order("username"),
         supabase.from("profiles").select("id", { count: "exact", head: true }).eq("is_admin", true),
+        supabase.from("post_comments").select("*, author:profiles(username, avatar_url)").order("created_at"),
       ]);
     if (settingsRow) setSettings(settingsRow);
     setForums(forumsRows || []);
     setOfficialPosts(postsRows || []);
     setProfiles(profileRows || []);
     setNeedsSetup(!adminCount);
+    const grouped = {};
+    (commentsRows || []).forEach((c) => { (grouped[c.post_id] ||= []).push(c); });
+    setPostComments(grouped);
+  }
+
+  async function loadFriendships(myId) {
+    const { data } = await supabase
+      .from("friendships")
+      .select("*, requester:profiles!friendships_requester_id_fkey(username, avatar_url), addressee:profiles!friendships_addressee_id_fkey(username, avatar_url)")
+      .or(`requester_id.eq.${myId},addressee_id.eq.${myId}`);
+    setFriendships(data || []);
   }
 
   useEffect(() => {
     (async () => {
       const { data: { session: authSession } } = await supabase.auth.getSession();
-      if (authSession?.user) await loadMe(authSession.user.id);
+      if (authSession?.user) {
+        await loadMe(authSession.user.id);
+        await loadFriendships(authSession.user.id);
+      }
       await loadAll();
       setReady(true);
     })();
 
     const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
-      if (newSession?.user) loadMe(newSession.user.id);
-      else setMe(null);
+      if (newSession?.user) { loadMe(newSession.user.id); loadFriendships(newSession.user.id); }
+      else { setMe(null); setFriendships([]); }
     });
     return () => sub.subscription.unsubscribe();
   }, []);
 
   async function loadForumMessages(forumId) {
-    const { data } = await supabase
-      .from("messages")
-      .select("*, author:profiles(id, username, avatar_url, is_admin, verified)")
-      .eq("forum_id", forumId)
-      .order("created_at");
-    setActiveForumMessages(data || []);
+    const [{ data: msgs }, { data: polls }] = await Promise.all([
+      supabase.from("messages").select("*, author:profiles(id, username, avatar_url, is_admin, verified)").eq("forum_id", forumId).order("created_at"),
+      supabase.from("polls").select("*, author:profiles(id, username), poll_votes(user_id, option_id)").eq("forum_id", forumId).order("created_at"),
+    ]);
+    setActiveForumMessages(msgs || []);
+    setActiveForumPolls(polls || []);
   }
 
   function openForum(forumId) {
     setActiveForumId(forumId);
     setView("forum");
     loadForumMessages(forumId);
+  }
+
+  async function openForums() {
+    setView("forums");
+    const { data } = await supabase.from("messages").select("forum_id");
+    if (data && data.length) {
+      const counts = {};
+      data.forEach((m) => { counts[m.forum_id] = (counts[m.forum_id] || 0) + 1; });
+      const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+      setTrendingForumId(top ? top[0] : null);
+    } else {
+      setTrendingForumId(null);
+    }
   }
 
   async function logout() {
@@ -141,15 +214,10 @@ export default function App() {
     await supabase.from("flags").insert({ author_id: authorId, room, text });
     if (me?.is_admin) refreshFlags();
   }
-
   async function refreshFlags() {
-    const { data } = await supabase
-      .from("flags")
-      .select("*, author:profiles(username)")
-      .order("created_at", { ascending: false });
+    const { data } = await supabase.from("flags").select("*, author:profiles(username)").order("created_at", { ascending: false });
     setFlags(data || []);
   }
-
   async function dismissFlag(flagId) {
     await supabase.from("flags").delete().eq("id", flagId);
     setFlags((f) => f.filter((x) => x.id !== flagId));
@@ -170,7 +238,7 @@ export default function App() {
   }
 
   async function openActivity(userId) {
-    const person = profileById(userId);
+    const person = profiles.find((p) => p.id === userId);
     setActivityTarget(person?.username || "");
     setView("activity");
     setActivityLoading(true);
@@ -193,12 +261,40 @@ export default function App() {
     return data?.email || null;
   }
 
+  // ---------- friends ----------
+  function friendStatusWith(otherId) {
+    const row = friendships.find((f) => (f.requester_id === otherId || f.addressee_id === otherId));
+    if (!row) return { status: "none" };
+    if (row.status === "accepted") return { status: "friends", row };
+    if (row.requester_id === me.id) return { status: "pending_sent", row };
+    return { status: "pending_received", row };
+  }
+  async function sendFriendRequest(otherId) {
+    await supabase.from("friendships").insert({ requester_id: me.id, addressee_id: otherId });
+    loadFriendships(me.id);
+  }
+  async function acceptFriendRequest(rowId) {
+    await supabase.from("friendships").update({ status: "accepted" }).eq("id", rowId);
+    loadFriendships(me.id);
+  }
+  async function removeFriendship(rowId) {
+    await supabase.from("friendships").delete().eq("id", rowId);
+    loadFriendships(me.id);
+  }
+
+  // ---------- reactions ----------
+  async function toggleReaction(message, emoji) {
+    const reactions = { ...(message.reactions || {}) };
+    const list = new Set(reactions[emoji] || []);
+    if (list.has(me.id)) list.delete(me.id); else list.add(me.id);
+    reactions[emoji] = Array.from(list);
+    if (reactions[emoji].length === 0) delete reactions[emoji];
+    await supabase.from("messages").update({ reactions }).eq("id", message.id);
+    setActiveForumMessages((msgs) => msgs.map((m) => (m.id === message.id ? { ...m, reactions } : m)));
+  }
+
   if (!ready) {
-    return (
-      <div className="ch-root">
-        <div className="ch-shell"><div className="ch-loading">Loading…</div></div>
-      </div>
-    );
+    return <div className="ch-root"><div className="ch-shell"><div className="ch-loading">Loading…</div></div></div>;
   }
 
   const headerContent = (
@@ -227,7 +323,7 @@ export default function App() {
   );
 
   return (
-    <div className="ch-root">
+    <div className="ch-root" style={accentStyle(me)}>
       {settings.banner_url && (
         <div className="ch-banner-wrap">
           <img src={settings.banner_url} alt="" style={{ objectPosition: `center ${settings.banner_position_y ?? 50}%` }} />
@@ -240,7 +336,7 @@ export default function App() {
 
         <div className="ch-tabs">
           <button className={`ch-tab ${view === "home" ? "active" : ""}`} onClick={() => setView("home")}>Home</button>
-          <button className={`ch-tab ${view === "forums" || view === "forum" ? "active" : ""}`} onClick={() => setView("forums")}>Chats</button>
+          <button className={`ch-tab ${view === "forums" || view === "forum" ? "active" : ""}`} onClick={openForums}>Chats</button>
           <button className={`ch-tab ${view === "people" ? "active" : ""}`} onClick={() => setView("people")}>People</button>
           {me && <button className={`ch-tab ${view === "profile" ? "active" : ""}`} onClick={() => setView("profile")}>Profile</button>}
         </div>
@@ -249,6 +345,8 @@ export default function App() {
           <HomeView
             me={me}
             posts={officialPosts}
+            comments={postComments}
+            profiles={profiles}
             onPost={async ({ title, body, imageFile }) => {
               let image_url = null;
               if (imageFile) image_url = await uploadImage(imageFile, "posts");
@@ -264,6 +362,10 @@ export default function App() {
               await supabase.from("official_posts").update({ pinned: !post.pinned }).eq("id", post.id);
               setOfficialPosts((p) => p.map((x) => (x.id === post.id ? { ...x, pinned: !x.pinned } : x)));
             }}
+            onComment={async (postId, text) => {
+              const { data } = await supabase.from("post_comments").insert({ post_id: postId, author_id: me.id, body: text }).select("*, author:profiles(username, avatar_url)").single();
+              if (data) setPostComments((c) => ({ ...c, [postId]: [...(c[postId] || []), data] }));
+            }}
           />
         )}
 
@@ -271,6 +373,7 @@ export default function App() {
           <ForumsView
             me={me}
             forums={forums}
+            trendingForumId={trendingForumId}
             onOpen={openForum}
             onCreate={async ({ name, description }) => {
               const { data } = await supabase.from("forums").insert({ name, description }).select().single();
@@ -287,7 +390,9 @@ export default function App() {
           <ChatRoomView
             forum={forums.find((f) => f.id === activeForumId)}
             me={me}
+            profiles={profiles}
             messages={activeForumMessages}
+            polls={activeForumPolls}
             onBack={() => setView("forums")}
             onSend={async (text, imageFile) => {
               let image_url = null;
@@ -299,21 +404,35 @@ export default function App() {
               const forum = forums.find((f) => f.id === activeForumId);
               reportFlag({ authorId: me.id, room: forum?.name || "Chat", text });
             }}
+            onReact={toggleReaction}
+            onCreatePoll={async (question, options) => {
+              const opts = options.map((text, i) => ({ id: String(i), text }));
+              await supabase.from("polls").insert({ forum_id: activeForumId, author_id: me.id, question, options: opts });
+              loadForumMessages(activeForumId);
+            }}
+            onVote={async (pollId, optionId) => {
+              await supabase.from("poll_votes").upsert({ poll_id: pollId, user_id: me.id, option_id: optionId });
+              loadForumMessages(activeForumId);
+            }}
+            onSavePinned={async (text) => {
+              await supabase.from("forums").update({ pinned_message: text }).eq("id", activeForumId);
+              setForums((f) => f.map((x) => (x.id === activeForumId ? { ...x, pinned_message: text } : x)));
+            }}
           />
         )}
 
         {view === "people" && (
-          <PeopleView
-            profiles={profiles}
-            me={me}
-            onOpen={(id) => { setPersonId(id); setView("person"); }}
-          />
+          <PeopleView profiles={profiles} me={me} onOpen={(id) => { setPersonId(id); setView("person"); }} />
         )}
 
-        {view === "person" && personId && profileById(personId) && (
+        {view === "person" && personId && profiles.find((p) => p.id === personId) && (
           <PersonProfileView
-            user={profileById(personId)}
+            user={profiles.find((p) => p.id === personId)}
             viewer={me}
+            friendInfo={me ? friendStatusWith(personId) : { status: "none" }}
+            onSendFriendRequest={() => sendFriendRequest(personId)}
+            onAcceptFriend={(rowId) => acceptFriendRequest(rowId)}
+            onRemoveFriend={(rowId) => removeFriendship(rowId)}
             onBack={() => setView("people")}
             onViewActivity={() => openActivity(personId)}
             onVerify={async () => { await supabase.from("profiles").update({ verified: true }).eq("id", personId); refreshProfiles(); }}
@@ -332,11 +451,16 @@ export default function App() {
         {view === "profile" && me && (
           <ProfileView
             me={me}
-            onSaveProfile={async ({ avatarFile, country, bio, currentAvatarUrl }) => {
+            friendships={friendships}
+            profiles={profiles}
+            onAcceptFriend={acceptFriendRequest}
+            onRemoveFriend={removeFriendship}
+            onOpenPerson={(pid) => { setPersonId(pid); setView("person"); }}
+            onSaveProfile={async ({ avatarFile, country, bio, currentAvatarUrl, accentColor }) => {
               let avatar_url = currentAvatarUrl;
               if (avatarFile) avatar_url = await uploadImage(avatarFile, `avatars/${me.id}`);
-              await supabase.from("profiles").update({ avatar_url, country, bio }).eq("id", me.id);
-              setMe((m) => ({ ...m, avatar_url, country, bio }));
+              await supabase.from("profiles").update({ avatar_url, country, bio, accent_color: accentColor }).eq("id", me.id);
+              setMe((m) => ({ ...m, avatar_url, country, bio, accent_color: accentColor }));
               refreshProfiles();
             }}
             onRenameUsername={async (newUsername) => {
@@ -365,9 +489,7 @@ export default function App() {
               const { data: existing } = await supabase.from("profiles").select("id").ilike("username", username.trim()).maybeSingle();
               if (existing) { setError("That username is taken."); setBusy(false); return; }
               const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-                email: email.trim(),
-                password,
-                options: { data: { username: username.trim() } },
+                email: email.trim(), password, options: { data: { username: username.trim() } },
               });
               if (signUpError) { setError(signUpError.message); setBusy(false); return; }
               if (!signUpData.session) { setError("Check your email to confirm your account, then log in."); setBusy(false); return; }
@@ -382,9 +504,7 @@ export default function App() {
               const { data: existing } = await supabase.from("profiles").select("id").ilike("username", username.trim()).maybeSingle();
               if (existing) { setError("That username is taken."); setBusy(false); return; }
               const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
-                email: email.trim(),
-                password,
-                options: { data: { username: username.trim() } },
+                email: email.trim(), password, options: { data: { username: username.trim() } },
               });
               if (signUpError) {
                 setError(signUpError.message.includes("registered") ? "An account with that email already exists — log in instead." : signUpError.message);
@@ -411,6 +531,7 @@ export default function App() {
                 return;
               }
               setMe(profile);
+              loadFriendships(profile.id);
               setView("home");
             }}
           />
@@ -453,9 +574,7 @@ export default function App() {
 
 function DangerButton({ label = "Delete", small, onConfirm }) {
   const [confirming, setConfirming] = useState(false);
-  if (!confirming) {
-    return <button className={`ch-btn danger ${small ? "small" : ""}`} onClick={() => setConfirming(true)}>{label}</button>;
-  }
+  if (!confirming) return <button className={`ch-btn danger ${small ? "small" : ""}`} onClick={() => setConfirming(true)}>{label}</button>;
   return (
     <span style={{ display: "flex", gap: 6 }}>
       <button className={`ch-btn solid danger ${small ? "small" : ""}`} onClick={onConfirm}>Confirm</button>
@@ -489,8 +608,6 @@ function LockControl({ user, onLock, onUnlock }) {
   );
 }
 
-// image is a *preview* (object URL or existing remote URL). The actual file
-// is handed back via onFile so the parent can upload it only when saving.
 function ImagePicker({ image, onFile, onClear, compact }) {
   const fileRef = useRef();
   const [preview, setPreview] = useState(image || null);
@@ -524,16 +641,84 @@ function ImagePicker({ image, onFile, onClear, compact }) {
   );
 }
 
-function ProfileView({ me, onSaveProfile, onRenameUsername }) {
+function ReactionBar({ message, me, onReact }) {
+  const reactions = message.reactions || {};
+  const canReact = me && (me.is_admin || me.verified);
+  return (
+    <div className="ch-reaction-bar">
+      {Object.entries(reactions).filter(([, users]) => users.length > 0).map(([emoji, users]) => (
+        <button
+          key={emoji}
+          className={`ch-reaction-pill ${users.includes(me?.id) ? "mine" : ""}`}
+          onClick={() => canReact && onReact(message, emoji)}
+        >
+          {emoji} {users.length}
+        </button>
+      ))}
+      {canReact && (
+        <div className="ch-reaction-add">
+          <button className="ch-reaction-pill add">+</button>
+          <div className="ch-reaction-picker">
+            {REACTION_EMOJIS.map((e) => (
+              <button key={e} onClick={() => onReact(message, e)}>{e}</button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PollCard({ poll, me, onVote }) {
+  const votes = poll.poll_votes || [];
+  const myVote = votes.find((v) => v.user_id === me?.id);
+  const total = votes.length;
+  const canVote = me && (me.is_admin || me.verified);
+  return (
+    <div className="ch-poll-card">
+      <div className="ch-poll-question">📊 {poll.question}</div>
+      {poll.options.map((opt) => {
+        const count = votes.filter((v) => v.option_id === opt.id).length;
+        const pct = total ? Math.round((count / total) * 100) : 0;
+        const mine = myVote?.option_id === opt.id;
+        return (
+          <button
+            key={opt.id}
+            className={`ch-poll-option ${mine ? "mine" : ""}`}
+            disabled={!canVote}
+            onClick={() => onVote(poll.id, opt.id)}
+          >
+            <div className="ch-poll-fill" style={{ width: `${pct}%` }} />
+            <span className="ch-poll-label">{opt.text}</span>
+            <span className="ch-poll-pct">{pct}% ({count})</span>
+          </button>
+        );
+      })}
+      <div className="ch-poll-meta">{poll.author?.username} · {fmtDate(poll.created_at)}</div>
+    </div>
+  );
+}
+
+function ProfileView({ me, friendships, profiles, onAcceptFriend, onRemoveFriend, onOpenPerson, onSaveProfile, onRenameUsername }) {
   const [avatarFile, setAvatarFile] = useState(null);
   const [country, setCountry] = useState(me.country || "");
   const [bio, setBio] = useState(me.bio || "");
+  const [accentColor, setAccentColor] = useState(me.accent_color || "gold");
   const [savedFlash, setSavedFlash] = useState(false);
   const [username, setUsername] = useState(me.username);
   const [usernameError, setUsernameError] = useState("");
   const [usernameSaved, setUsernameSaved] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [messageCount, setMessageCount] = useState(0);
+
+  useEffect(() => {
+    supabase.from("messages").select("id", { count: "exact", head: true }).eq("author_id", me.id).then(({ count }) => setMessageCount(count || 0));
+  }, [me.id]);
+
+  const pendingReceived = friendships.filter((f) => f.status === "pending" && f.addressee_id === me.id);
+  const friends = friendships.filter((f) => f.status === "accepted");
+  const badges = computeBadges(me, messageCount);
 
   return (
     <div>
@@ -542,6 +727,7 @@ function ProfileView({ me, onSaveProfile, onRenameUsername }) {
         <div>
           <h2 className="ch-serif" style={{ margin: "0 0 4px 0" }}>{me.username}</h2>
           <div className="ch-note" style={{ margin: 0 }}>{me.email}</div>
+          <div className="ch-badge-row">{badges.map((b, i) => <span key={i} className="ch-achievement" title={b.label}>{b.icon} {b.label}</span>)}</div>
         </div>
       </div>
 
@@ -554,8 +740,7 @@ function ProfileView({ me, onSaveProfile, onRenameUsername }) {
             className="ch-btn solid"
             disabled={renaming || !username.trim() || username.trim() === me.username}
             onClick={async () => {
-              setRenaming(true);
-              setUsernameError("");
+              setRenaming(true); setUsernameError("");
               const res = await onRenameUsername(username);
               setRenaming(false);
               if (!res.ok) setUsernameError(res.message);
@@ -567,11 +752,35 @@ function ProfileView({ me, onSaveProfile, onRenameUsername }) {
         </div>
       </div>
 
+      <p className="ch-sub">Friend requests ({pendingReceived.length})</p>
+      {pendingReceived.length === 0 && <p className="ch-empty">No pending requests.</p>}
+      {pendingReceived.map((f) => (
+        <div className="ch-row" key={f.id}>
+          <span onClick={() => onOpenPerson(f.requester_id)} style={{ cursor: "pointer" }}>{f.requester?.username}</span>
+          <div className="ch-row-actions">
+            <button className="ch-btn small" onClick={() => onAcceptFriend(f.id)}>Accept</button>
+            <button className="ch-btn text small" onClick={() => onRemoveFriend(f.id)}>Decline</button>
+          </div>
+        </div>
+      ))}
+
+      <p className="ch-sub">Friends ({friends.length})</p>
+      {friends.length === 0 && <p className="ch-empty">No friends yet — add some from People.</p>}
+      {friends.map((f) => {
+        const other = f.requester_id === me.id ? f.addressee : f.requester;
+        const otherId = f.requester_id === me.id ? f.addressee_id : f.requester_id;
+        return (
+          <div className="ch-row" key={f.id}>
+            <span onClick={() => onOpenPerson(otherId)} style={{ cursor: "pointer" }}>{other?.username}</span>
+            <DangerButton small label="Remove" onConfirm={() => onRemoveFriend(f.id)} />
+          </div>
+        );
+      })}
+
+      <p className="ch-sub">Profile photo & details</p>
       <div className="ch-card">
         <span className="ch-label">Profile photo</span>
-        <div style={{ marginBottom: 18 }}>
-          <ImagePicker image={me.avatar_url} onFile={setAvatarFile} onClear={() => setAvatarFile(null)} />
-        </div>
+        <div style={{ marginBottom: 18 }}><ImagePicker image={me.avatar_url} onFile={setAvatarFile} onClear={() => setAvatarFile(null)} /></div>
 
         <span className="ch-label">Country</span>
         <select className="ch-field" value={country} onChange={(e) => setCountry(e.target.value)}>
@@ -582,12 +791,26 @@ function ProfileView({ me, onSaveProfile, onRenameUsername }) {
         <span className="ch-label">Bio</span>
         <textarea className="ch-field" rows={4} placeholder="Tell people a bit about yourself…" value={bio} onChange={(e) => setBio(e.target.value)} />
 
+        <span className="ch-label">Accent color</span>
+        <div className="ch-swatch-row">
+          {Object.entries(ACCENT_COLORS).map(([key, c]) => (
+            <button
+              key={key}
+              className={`ch-swatch ${accentColor === key ? "active" : ""}`}
+              style={{ background: c.accent }}
+              title={c.label}
+              onClick={() => setAccentColor(key)}
+            />
+          ))}
+        </div>
+
         <button
           className="ch-btn solid"
+          style={{ marginTop: 18 }}
           disabled={saving}
           onClick={async () => {
             setSaving(true);
-            await onSaveProfile({ avatarFile, country, bio, currentAvatarUrl: me.avatar_url });
+            await onSaveProfile({ avatarFile, country, bio, currentAvatarUrl: me.avatar_url, accentColor });
             setSaving(false);
             setSavedFlash(true);
             setTimeout(() => setSavedFlash(false), 1500);
@@ -600,9 +823,16 @@ function ProfileView({ me, onSaveProfile, onRenameUsername }) {
   );
 }
 
-function PersonProfileView({ user, viewer, onBack, onViewActivity, onVerify, onUnverify, onPromote, onRemove, onLock, onUnlock }) {
+function PersonProfileView({ user, viewer, friendInfo, onSendFriendRequest, onAcceptFriend, onRemoveFriend, onBack, onViewActivity, onVerify, onUnverify, onPromote, onRemove, onLock, onUnlock }) {
   const isAdmin = viewer?.is_admin;
   const isSelf = viewer && viewer.id === user.id;
+  const [messageCount, setMessageCount] = useState(0);
+
+  useEffect(() => {
+    supabase.from("messages").select("id", { count: "exact", head: true }).eq("author_id", user.id).then(({ count }) => setMessageCount(count || 0));
+  }, [user.id]);
+
+  const badges = computeBadges(user, messageCount);
 
   return (
     <div>
@@ -618,8 +848,28 @@ function PersonProfileView({ user, viewer, onBack, onViewActivity, onVerify, onU
             {!user.is_admin && !user.verified && <span className="ch-badge plain">Pending</span>}
             {isAdmin && isLocked(user) && <span className="ch-badge danger">{lockLabel(user)}</span>}
           </div>
+          <div className="ch-badge-row">{badges.map((b, i) => <span key={i} className="ch-achievement" title={b.label}>{b.icon} {b.label}</span>)}</div>
         </div>
       </div>
+
+      {!isSelf && viewer && (
+        <div style={{ marginBottom: 20 }}>
+          {friendInfo.status === "none" && <button className="ch-btn solid" onClick={onSendFriendRequest}>Add friend</button>}
+          {friendInfo.status === "pending_sent" && <button className="ch-btn" disabled>Request sent</button>}
+          {friendInfo.status === "pending_received" && (
+            <span style={{ display: "flex", gap: 8 }}>
+              <button className="ch-btn solid" onClick={() => onAcceptFriend(friendInfo.row.id)}>Accept friend request</button>
+              <button className="ch-btn text" onClick={() => onRemoveFriend(friendInfo.row.id)}>Decline</button>
+            </span>
+          )}
+          {friendInfo.status === "friends" && (
+            <span style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span className="ch-badge moss">Friends</span>
+              <DangerButton small label="Remove friend" onConfirm={() => onRemoveFriend(friendInfo.row.id)} />
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="ch-card">
         {user.country && <div className="ch-note" style={{ margin: "0 0 12px 0" }}>📍 {user.country}</div>}
@@ -640,11 +890,7 @@ function PersonProfileView({ user, viewer, onBack, onViewActivity, onVerify, onU
               <button className="ch-btn small" onClick={onViewActivity}>View everything they've posted</button>
               {!user.is_admin && (
                 <>
-                  {user.verified ? (
-                    <button className="ch-btn small" onClick={onUnverify}>Revoke verification</button>
-                  ) : (
-                    <button className="ch-btn small" onClick={onVerify}>Verify</button>
-                  )}
+                  {user.verified ? <button className="ch-btn small" onClick={onUnverify}>Revoke verification</button> : <button className="ch-btn small" onClick={onVerify}>Verify</button>}
                   <button className="ch-btn small" onClick={onPromote}>Make admin</button>
                 </>
               )}
@@ -663,7 +909,44 @@ function PersonProfileView({ user, viewer, onBack, onViewActivity, onVerify, onU
   );
 }
 
-function HomeView({ me, posts, onPost, onDelete, onTogglePin }) {
+function CommentsSection({ post, comments, me, onComment }) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState("");
+  const canComment = me && (me.is_admin || me.verified);
+  const list = comments || [];
+
+  return (
+    <div className="ch-comments">
+      <button className="ch-btn text small" onClick={() => setOpen((o) => !o)}>
+        💬 {list.length === 0 ? "Comment" : `${list.length} comment${list.length === 1 ? "" : "s"}`}
+      </button>
+      {open && (
+        <div className="ch-comments-body">
+          {list.map((c) => (
+            <div className="ch-comment-row" key={c.id}>
+              <Avatar user={c.author} size="sm" />
+              <div>
+                <div className="ch-meta" style={{ marginBottom: 2 }}>{c.author?.username} · {fmtDate(c.created_at)}</div>
+                <div>{c.body}</div>
+              </div>
+            </div>
+          ))}
+          {canComment ? (
+            <div className="ch-comment-input-row">
+              <input className="ch-field" style={{ marginBottom: 0 }} placeholder="Write a comment…" value={text} onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && text.trim()) { onComment(post.id, text.trim()); setText(""); } }} />
+              <button className="ch-btn solid small" disabled={!text.trim()} onClick={() => { onComment(post.id, text.trim()); setText(""); }}>Post</button>
+            </div>
+          ) : (
+            <p className="ch-note" style={{ marginBottom: 0 }}>{me ? "You need to be verified to comment." : "Log in to comment."}</p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HomeView({ me, posts, comments, profiles, onPost, onDelete, onTogglePin, onComment }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [imageFile, setImageFile] = useState(null);
@@ -677,18 +960,11 @@ function HomeView({ me, posts, onPost, onDelete, onTogglePin }) {
         <div className="ch-compose">
           <input className="ch-field" placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
           <textarea className="ch-field" rows={3} placeholder="What's the update?" value={body} onChange={(e) => setBody(e.target.value)} />
-          <div style={{ marginBottom: 14 }}>
-            <ImagePicker image={null} onFile={setImageFile} onClear={() => setImageFile(null)} />
-          </div>
+          <div style={{ marginBottom: 14 }}><ImagePicker image={null} onFile={setImageFile} onClear={() => setImageFile(null)} /></div>
           <button
             className="ch-btn solid"
             disabled={posting || !title.trim() || !body.trim()}
-            onClick={async () => {
-              setPosting(true);
-              await onPost({ title: title.trim(), body: body.trim(), imageFile });
-              setTitle(""); setBody(""); setImageFile(null);
-              setPosting(false);
-            }}
+            onClick={async () => { setPosting(true); await onPost({ title: title.trim(), body: body.trim(), imageFile }); setTitle(""); setBody(""); setImageFile(null); setPosting(false); }}
           >
             Publish
           </button>
@@ -702,7 +978,7 @@ function HomeView({ me, posts, onPost, onDelete, onTogglePin }) {
             {p.pinned && <div className="ch-pin">Pinned</div>}
             <h3 className="ch-serif">{p.title}</h3>
             <div className="ch-meta">{fmtDate(p.created_at)} · {p.author?.username}</div>
-            <p>{p.body}</p>
+            <p><MentionText text={p.body} profiles={profiles} /></p>
             {p.image_url && <img src={p.image_url} alt="" />}
             {me?.is_admin && (
               <div className="ch-card-actions">
@@ -710,6 +986,7 @@ function HomeView({ me, posts, onPost, onDelete, onTogglePin }) {
                 <DangerButton small onConfirm={() => onDelete(p.id)} />
               </div>
             )}
+            <CommentsSection post={p} comments={comments[p.id]} me={me} onComment={onComment} />
           </div>
         ))}
       </div>
@@ -717,7 +994,7 @@ function HomeView({ me, posts, onPost, onDelete, onTogglePin }) {
   );
 }
 
-function ForumsView({ me, forums, onOpen, onCreate, onDelete }) {
+function ForumsView({ me, forums, trendingForumId, onOpen, onCreate, onDelete }) {
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
   const [desc, setDesc] = useState("");
@@ -725,22 +1002,14 @@ function ForumsView({ me, forums, onOpen, onCreate, onDelete }) {
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
-        {me?.is_admin && (
-          <button className="ch-btn" onClick={() => setShowCreate((s) => !s)}>{showCreate ? "Cancel" : "New chat room"}</button>
-        )}
+        {me?.is_admin && <button className="ch-btn" onClick={() => setShowCreate((s) => !s)}>{showCreate ? "Cancel" : "New chat room"}</button>}
       </div>
 
       {showCreate && (
         <div className="ch-compose">
           <input className="ch-field" placeholder="Room name (e.g. Support)" value={name} onChange={(e) => setName(e.target.value)} />
           <textarea className="ch-field" rows={2} placeholder="What's this room about?" value={desc} onChange={(e) => setDesc(e.target.value)} />
-          <button
-            className="ch-btn solid"
-            disabled={!name.trim()}
-            onClick={async () => { await onCreate({ name: name.trim(), description: desc.trim() }); setName(""); setDesc(""); setShowCreate(false); }}
-          >
-            Create room
-          </button>
+          <button className="ch-btn solid" disabled={!name.trim()} onClick={async () => { await onCreate({ name: name.trim(), description: desc.trim() }); setName(""); setDesc(""); setShowCreate(false); }}>Create room</button>
         </div>
       )}
 
@@ -754,28 +1023,28 @@ function ForumsView({ me, forums, onOpen, onCreate, onDelete }) {
           <div onClick={() => onOpen(f.id)} style={{ flex: 1, display: "flex", alignItems: "center", gap: 14 }}>
             <Avatar user={{ username: f.name }} size="md" />
             <div>
-              <h3 className="ch-serif">{f.name}</h3>
+              <h3 className="ch-serif">{f.name} {f.id === trendingForumId && <span className="ch-trending">🔥 Trending</span>}</h3>
               <p>{f.description}</p>
             </div>
           </div>
-          {me?.is_admin && (
-            <div onClick={(e) => e.stopPropagation()}>
-              <DangerButton small onConfirm={() => onDelete(f.id)} />
-            </div>
-          )}
+          {me?.is_admin && <div onClick={(e) => e.stopPropagation()}><DangerButton small onConfirm={() => onDelete(f.id)} /></div>}
         </div>
       ))}
     </div>
   );
 }
 
-function ChatBar({ canPost, disabledText, placeholder, onSend, onBadContent }) {
+function ChatBar({ canPost, disabledText, placeholder, profiles, onSend, onBadContent, onCreatePoll }) {
   const [open, setOpen] = useState(false);
+  const [pollMode, setPollMode] = useState(false);
   const [text, setText] = useState("");
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const [warning, setWarning] = useState(false);
   const [sending, setSending] = useState(false);
+  const [mentionSuggestions, setMentionSuggestions] = useState([]);
+  const [question, setQuestion] = useState("");
+  const [options, setOptions] = useState(["", ""]);
 
   useEffect(() => {
     if (!warning) return;
@@ -784,9 +1053,21 @@ function ChatBar({ canPost, disabledText, placeholder, onSend, onBadContent }) {
   }, [warning]);
 
   if (!canPost) return <p className="ch-note" style={{ marginTop: 20 }}>{disabledText}</p>;
+  if (!open) return <button className="ch-chat-pill" onClick={() => setOpen(true)}>{placeholder}</button>;
 
-  if (!open) {
-    return <button className="ch-chat-pill" onClick={() => setOpen(true)}>{placeholder}</button>;
+  function handleTextChange(v) {
+    setText(v);
+    const match = v.match(/@(\w*)$/);
+    if (match) {
+      const partial = match[1].toLowerCase();
+      setMentionSuggestions(profiles.filter((p) => p.username.toLowerCase().startsWith(partial)).slice(0, 5));
+    } else {
+      setMentionSuggestions([]);
+    }
+  }
+  function pickMention(username) {
+    setText((t) => t.replace(/@(\w*)$/, `@${username} `));
+    setMentionSuggestions([]);
   }
 
   async function send() {
@@ -802,42 +1083,85 @@ function ChatBar({ canPost, disabledText, placeholder, onSend, onBadContent }) {
     setText(""); setImageFile(null); setImagePreview(null);
   }
 
+  if (pollMode) {
+    return (
+      <div className="ch-chat-open">
+        <div className="ch-chat-open-header">
+          <span>New poll</span>
+          <button className="ch-btn text small" onClick={() => setPollMode(false)}>Back to message</button>
+        </div>
+        <input className="ch-field" placeholder="Ask a question…" value={question} onChange={(e) => setQuestion(e.target.value)} />
+        {options.map((opt, i) => (
+          <input
+            key={i} className="ch-field" placeholder={`Option ${i + 1}`} value={opt}
+            onChange={(e) => setOptions((o) => o.map((x, idx) => (idx === i ? e.target.value : x)))}
+          />
+        ))}
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          {options.length < 4 && <button className="ch-btn small" onClick={() => setOptions((o) => [...o, ""])}>Add option</button>}
+          {options.length > 2 && <button className="ch-btn small" onClick={() => setOptions((o) => o.slice(0, -1))}>Remove option</button>}
+        </div>
+        <button
+          className="ch-btn solid"
+          disabled={!question.trim() || options.filter((o) => o.trim()).length < 2}
+          onClick={async () => {
+            await onCreatePoll(question.trim(), options.map((o) => o.trim()).filter(Boolean));
+            setQuestion(""); setOptions(["", ""]); setPollMode(false); setOpen(false);
+          }}
+        >
+          Post poll
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div className="ch-chat-open">
       <div className="ch-chat-open-header">
         <span>Message</span>
-        <button className="ch-btn text small" onClick={() => setOpen(false)}>Close</button>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button className="ch-btn text small" onClick={() => setPollMode(true)}>📊 Poll</button>
+          <button className="ch-btn text small" onClick={() => setOpen(false)}>Close</button>
+        </div>
       </div>
       {warning && <div className="ch-error" style={{ marginBottom: 10 }}>This text contains bad content — it wasn't sent, and it's been reported to the admin.</div>}
       {imagePreview && (
-        <div className="ch-image-preview">
-          <img src={imagePreview} alt="" />
-          <button type="button" onClick={() => { setImageFile(null); setImagePreview(null); }}>×</button>
-        </div>
+        <div className="ch-image-preview"><img src={imagePreview} alt="" /><button type="button" onClick={() => { setImageFile(null); setImagePreview(null); }}>×</button></div>
       )}
-      <div className="ch-chat-input-row">
-        <ImagePicker image={null} compact onFile={(f) => { setImageFile(f); setImagePreview(URL.createObjectURL(f)); }} />
-        <textarea
-          className="ch-chat-textarea"
-          rows={1}
-          placeholder={placeholder}
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-        />
-        <button className="ch-btn solid small" disabled={sending || (!text.trim() && !imageFile)} onClick={send}>Send</button>
+      <div style={{ position: "relative" }}>
+        {mentionSuggestions.length > 0 && (
+          <div className="ch-mention-suggestions">
+            {mentionSuggestions.map((p) => <button key={p.id} onClick={() => pickMention(p.username)}>@{p.username}</button>)}
+          </div>
+        )}
+        <div className="ch-chat-input-row">
+          <ImagePicker image={null} compact onFile={(f) => { setImageFile(f); setImagePreview(URL.createObjectURL(f)); }} />
+          <textarea
+            className="ch-chat-textarea" rows={1} placeholder={placeholder} value={text}
+            onChange={(e) => handleTextChange(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+          />
+          <button className="ch-btn solid small" disabled={sending || (!text.trim() && !imageFile)} onClick={send}>Send</button>
+        </div>
       </div>
     </div>
   );
 }
 
-function ChatRoomView({ forum, me, messages, onBack, onSend, onFlag }) {
+function ChatRoomView({ forum, me, profiles, messages, polls, onBack, onSend, onFlag, onReact, onCreatePoll, onVote, onSavePinned }) {
   const canPost = me && (me.is_admin || me.verified);
   const scrollRef = useRef(null);
+  const [editingPinned, setEditingPinned] = useState(false);
+  const [pinnedDraft, setPinnedDraft] = useState(forum?.pinned_message || "");
+
+  const feed = [
+    ...messages.map((m) => ({ type: "message", date: m.created_at, data: m })),
+    ...polls.map((p) => ({ type: "poll", date: p.created_at, data: p })),
+  ].sort((a, b) => new Date(a.date) - new Date(b.date));
 
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-  }, [messages.length]);
+  }, [feed.length]);
 
   if (!forum) return <p className="ch-empty">Chat room not found.</p>;
 
@@ -852,8 +1176,29 @@ function ChatRoomView({ forum, me, messages, onBack, onSend, onFlag }) {
         </div>
       </div>
 
+      {(forum.pinned_message || me?.is_admin) && (
+        <div className="ch-pinned-banner">
+          {editingPinned ? (
+            <div style={{ width: "100%" }}>
+              <textarea className="ch-field" rows={2} value={pinnedDraft} onChange={(e) => setPinnedDraft(e.target.value)} placeholder="Set a pinned welcome message for this room…" />
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="ch-btn solid small" onClick={() => { onSavePinned(pinnedDraft.trim()); setEditingPinned(false); }}>Save</button>
+                <button className="ch-btn text small" onClick={() => setEditingPinned(false)}>Cancel</button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <span>📌 {forum.pinned_message || <em>No welcome message set.</em>}</span>
+              {me?.is_admin && <button className="ch-btn text small" onClick={() => setEditingPinned(true)}>Edit</button>}
+            </>
+          )}
+        </div>
+      )}
+
       <div className="ch-chat-scroll" ref={scrollRef}>
-        {messages.map((m) => {
+        {feed.map((item) => {
+          if (item.type === "poll") return <PollCard key={`poll-${item.data.id}`} poll={item.data} me={me} onVote={onVote} />;
+          const m = item.data;
           const own = me && m.author?.id === me.id;
           return (
             <div className={`ch-msg-row ${own ? "own" : "other"}`} key={m.id}>
@@ -861,10 +1206,11 @@ function ChatRoomView({ forum, me, messages, onBack, onSend, onFlag }) {
               <div className="ch-msg-col">
                 {!own && <div className="ch-msg-sender">{m.author?.username}</div>}
                 <div className={`ch-bubble ${own ? "own" : "other"}`}>
-                  {m.body && <span>{m.body}</span>}
+                  {m.body && <span><MentionText text={m.body} profiles={profiles} /></span>}
                   {m.image_url && <img src={m.image_url} alt="" />}
                 </div>
                 <div className="ch-msg-time">{fmtTime(m.created_at)}</div>
+                <ReactionBar message={m} me={me} onReact={onReact} />
               </div>
             </div>
           );
@@ -875,8 +1221,10 @@ function ChatRoomView({ forum, me, messages, onBack, onSend, onFlag }) {
         canPost={canPost}
         disabledText={me ? "You need to be verified to send messages here." : "Log in to send messages."}
         placeholder="Message…"
+        profiles={profiles}
         onSend={onSend}
         onBadContent={onFlag}
+        onCreatePoll={onCreatePoll}
       />
     </div>
   );
@@ -902,9 +1250,7 @@ function ActivityView({ target, items, loading, onBack }) {
 
 function PeopleView({ profiles, me, onOpen }) {
   const [q, setQ] = useState("");
-  const list = profiles
-    .filter((u) => u.username.toLowerCase().includes(q.trim().toLowerCase()))
-    .sort((a, b) => a.username.localeCompare(b.username));
+  const list = profiles.filter((u) => u.username.toLowerCase().includes(q.trim().toLowerCase())).sort((a, b) => a.username.localeCompare(b.username));
 
   return (
     <div>
@@ -963,8 +1309,7 @@ function AuthView({ mode, error, setError, busy, onSetup, onSignup, onLogin }) {
       <span className="ch-label">Confirm password</span>
       <input className="ch-field" type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
       <button
-        className="ch-btn solid"
-        disabled={busy}
+        className="ch-btn solid" disabled={busy}
         onClick={() => { setError(""); if (isSetup) onSetup({ username, email, password }); else onSignup({ username, email, password, confirm }); }}
       >
         {isSetup ? "Create account" : "Sign up"}
