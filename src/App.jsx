@@ -364,12 +364,13 @@ export default function App() {
               setBusy(true);
               const { data: existing } = await supabase.from("profiles").select("id").ilike("username", username.trim()).maybeSingle();
               if (existing) { setError("That username is taken."); setBusy(false); return; }
-              const { data: signUpData, error: signUpError } = await supabase.auth.signUp({ email: email.trim(), password });
+              const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+                email: email.trim(),
+                password,
+                options: { data: { username: username.trim() } },
+              });
               if (signUpError) { setError(signUpError.message); setBusy(false); return; }
               if (!signUpData.session) { setError("Check your email to confirm your account, then log in."); setBusy(false); return; }
-              await supabase.from("profiles").insert({
-                id: signUpData.user.id, username: username.trim(), email: email.trim(), is_admin: true, verified: true,
-              });
               await loadMe(signUpData.user.id);
               await loadAll();
               setBusy(false);
@@ -380,16 +381,17 @@ export default function App() {
               setBusy(true);
               const { data: existing } = await supabase.from("profiles").select("id").ilike("username", username.trim()).maybeSingle();
               if (existing) { setError("That username is taken."); setBusy(false); return; }
-              const { data: signUpData, error: signUpError } = await supabase.auth.signUp({ email: email.trim(), password });
+              const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+                email: email.trim(),
+                password,
+                options: { data: { username: username.trim() } },
+              });
               if (signUpError) {
                 setError(signUpError.message.includes("registered") ? "An account with that email already exists — log in instead." : signUpError.message);
                 setBusy(false);
                 return;
               }
               if (!signUpData.session) { setError("Check your email to confirm your account, then log in."); setBusy(false); return; }
-              await supabase.from("profiles").insert({
-                id: signUpData.user.id, username: username.trim(), email: email.trim(), is_admin: false, verified: false,
-              });
               await loadMe(signUpData.user.id);
               await refreshProfiles();
               setBusy(false);
