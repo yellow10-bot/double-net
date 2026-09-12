@@ -140,3 +140,50 @@ html, body, #root { height: 100%; margin: 0; }
 
 .ch-controls-btn { position: fixed; left: 24px; bottom: 24px; background: var(--ink); color: #fff; border: none; padding: 14px 22px; border-radius: 999px; font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: 0 8px 20px rgba(0,0,0,0.2); z-index: 50; display: flex; align-items: center; gap: 8px; }
 .ch-controls-btn:hover { background: #3a352a; }
+
+/* mentions */
+.ch-mention { color: var(--gold); font-weight: 600; }
+.ch-mention-suggestions { position: absolute; bottom: 100%; left: 0; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-sm); box-shadow: 0 4px 14px rgba(0,0,0,0.12); margin-bottom: 6px; overflow: hidden; z-index: 10; }
+.ch-mention-suggestions button { display: block; width: 100%; text-align: left; padding: 8px 14px; background: none; border: none; font-family: inherit; font-size: 13px; cursor: pointer; }
+.ch-mention-suggestions button:hover { background: var(--paper); }
+
+/* reactions */
+.ch-reaction-bar { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; align-items: center; }
+.ch-reaction-pill { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); cursor: pointer; }
+.ch-reaction-pill.mine { background: var(--gold-soft); border-color: var(--gold); }
+.ch-reaction-pill.add { font-weight: 700; color: var(--ink-soft); }
+.ch-reaction-add { position: relative; display: inline-block; }
+.ch-reaction-picker { display: none; position: absolute; bottom: 100%; left: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 4px 6px; margin-bottom: 6px; gap: 2px; white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,0.12); z-index: 10; }
+.ch-reaction-add:hover .ch-reaction-picker { display: flex; }
+.ch-reaction-picker button { background: none; border: none; font-size: 16px; padding: 2px 5px; cursor: pointer; }
+
+/* polls */
+.ch-poll-card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-md); padding: 16px 18px; margin: 4px 0; max-width: 340px; }
+.ch-poll-question { font-weight: 600; margin-bottom: 10px; }
+.ch-poll-option { position: relative; display: flex; justify-content: space-between; width: 100%; text-align: left; padding: 9px 12px; margin-bottom: 6px; border-radius: var(--r-sm); border: 1px solid var(--line); background: var(--paper); cursor: pointer; overflow: hidden; font-family: inherit; font-size: 13px; }
+.ch-poll-option.mine { border-color: var(--gold); }
+.ch-poll-option:disabled { cursor: default; }
+.ch-poll-fill { position: absolute; inset: 0; background: var(--gold-soft); z-index: 0; }
+.ch-poll-label, .ch-poll-pct { position: relative; z-index: 1; }
+.ch-poll-meta { font-size: 11px; color: var(--ink-soft); margin-top: 6px; }
+
+/* pinned room message */
+.ch-pinned-banner { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: var(--gold-soft); border-radius: var(--r-md); padding: 12px 16px; margin-bottom: 16px; font-size: 13px; }
+
+/* trending */
+.ch-trending { font-size: 11px; color: var(--gold); font-weight: 600; margin-left: 8px; }
+
+/* achievements */
+.ch-badge-row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.ch-achievement { font-size: 11px; background: var(--paper); border: 1px solid var(--line); border-radius: 999px; padding: 3px 9px; }
+
+/* accent color swatches */
+.ch-swatch-row { display: flex; gap: 10px; margin-bottom: 6px; }
+.ch-swatch { width: 32px; height: 32px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
+.ch-swatch.active { border-color: var(--ink); }
+
+/* comments on official posts */
+.ch-comments { margin-top: 14px; }
+.ch-comments-body { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.ch-comment-row { display: flex; gap: 10px; margin-bottom: 12px; }
+.ch-comment-input-row { display: flex; gap: 8px; margin-top: 10px; }
