@@ -1,7 +1,14 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from "react";
 import { supabase } from "./lib/supabaseClient";
 import { containsBadContent } from "./lib/filter";
 import { uploadImage } from "./lib/uploadImage";
+import { AVATAR_MODELS, AVATAR_ACCESSORIES, unlockLevelFor } from "./lib/avatarModels";
+
+const RawAvatar3D = lazy(() => import("./components/Avatar3D"));
+function Avatar3D(props) {
+  if (!props.modelFile) return null;
+  return <Suspense fallback={<div style={{ width: props.size || 160, height: props.size || 160 }} />}><RawAvatar3D {...props} /></Suspense>;
+}
 
 // ---------- small helpers ----------
 function fmtDate(ts) {
@@ -463,6 +470,11 @@ export default function App() {
               setMe((m) => ({ ...m, avatar_url, country, bio, accent_color: accentColor }));
               refreshProfiles();
             }}
+            onSaveAvatarModel={async (avatar_model, avatar_accessory) => {
+              await supabase.from("profiles").update({ avatar_model, avatar_accessory }).eq("id", me.id);
+              setMe((m) => ({ ...m, avatar_model, avatar_accessory }));
+              refreshProfiles();
+            }}
             onRenameUsername={async (newUsername) => {
               const trimmed = newUsername.trim();
               if (!trimmed) return { ok: false, message: "Username can't be empty." };
@@ -699,7 +711,7 @@ function PollCard({ poll, me, onVote }) {
   );
 }
 
-function ProfileView({ me, friendships, profiles, onAcceptFriend, onRemoveFriend, onOpenPerson, onSaveProfile, onRenameUsername }) {
+function ProfileView({ me, friendships, profiles, onAcceptFriend, onRemoveFriend, onOpenPerson, onSaveProfile, onSaveAvatarModel, onRenameUsername }) {
   const [avatarFile, setAvatarFile] = useState(null);
   const [country, setCountry] = useState(me.country || "");
   const [bio, setBio] = useState(me.bio || "");
@@ -719,16 +731,71 @@ function ProfileView({ me, friendships, profiles, onAcceptFriend, onRemoveFriend
   const pendingReceived = friendships.filter((f) => f.status === "pending" && f.addressee_id === me.id);
   const friends = friendships.filter((f) => f.status === "accepted");
   const badges = computeBadges(me, messageCount);
+  const unlockLevel = unlockLevelFor(me, messageCount);
+  const currentModel = AVATAR_MODELS.find((m) => m.key === me.avatar_model);
+  const currentAccessory = AVATAR_ACCESSORIES.find((a) => a.key === me.avatar_accessory);
 
   return (
     <div>
       <div className="ch-profile-head">
-        <Avatar user={me} size="lg" />
+        {currentModel ? <Avatar3D modelFile={currentModel.file} accessoryFile={currentAccessory?.file} size={90} /> : <Avatar user={me} size="lg" />}
         <div>
           <h2 className="ch-serif" style={{ margin: "0 0 4px 0" }}>{me.username}</h2>
           <div className="ch-note" style={{ margin: 0 }}>{me.email}</div>
           <div className="ch-badge-row">{badges.map((b, i) => <span key={i} className="ch-achievement" title={b.label}>{b.icon} {b.label}</span>)}</div>
         </div>
+      </div>
+
+      <p className="ch-sub">3D avatar</p>
+      <div className="ch-card" style={{ marginBottom: 20 }}>
+        {currentModel && (
+          <div style={{ marginBottom: 16 }}>
+            <Avatar3D modelFile={currentModel.file} accessoryFile={currentAccessory?.file} size={180} />
+            <p className="ch-note" style={{ textAlign: "center", margin: "6px 0 0" }}>Drag to rotate</p>
+          </div>
+        )}
+        <span className="ch-label">Character</span>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 8, marginBottom: 16 }}>
+          {AVATAR_MODELS.map((m) => {
+            const unlocked = unlockLevel >= m.need;
+            return (
+              <button
+                key={m.key}
+                className="ch-btn small"
+                style={{ opacity: unlocked ? 1 : 0.5, borderColor: me.avatar_model === m.key ? "var(--gold)" : "var(--line)", textAlign: "left" }}
+                disabled={!unlocked}
+                onClick={() => onSaveAvatarModel(m.key, me.avatar_accessory)}
+              >
+                {!unlocked && "🔒 "}{m.label}
+              </button>
+            );
+          })}
+        </div>
+        <span className="ch-label">Accessory</span>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            className="ch-btn small"
+            style={{ borderColor: !me.avatar_accessory ? "var(--gold)" : "var(--line)" }}
+            onClick={() => onSaveAvatarModel(me.avatar_model, null)}
+          >
+            None
+          </button>
+          {AVATAR_ACCESSORIES.map((a) => {
+            const unlocked = unlockLevel >= a.need;
+            return (
+              <button
+                key={a.key}
+                className="ch-btn small"
+                style={{ opacity: unlocked ? 1 : 0.5, borderColor: me.avatar_accessory === a.key ? "var(--gold)" : "var(--line)" }}
+                disabled={!unlocked}
+                onClick={() => onSaveAvatarModel(me.avatar_model, a.key)}
+              >
+                {!unlocked && "🔒 "}{a.label}
+              </button>
+            );
+          })}
+        </div>
+        <p className="ch-note" style={{ marginTop: 14, marginBottom: 0 }}>More characters and accessories unlock as you're more active — chat regularly, stick around, or become a creator.</p>
       </div>
 
       <div className="ch-card" style={{ marginBottom: 20 }}>
@@ -833,13 +900,15 @@ function PersonProfileView({ user, viewer, friendInfo, onSendFriendRequest, onAc
   }, [user.id]);
 
   const badges = computeBadges(user, messageCount);
+  const model = AVATAR_MODELS.find((m) => m.key === user.avatar_model);
+  const accessory = AVATAR_ACCESSORIES.find((a) => a.key === user.avatar_accessory);
 
   return (
     <div>
       <button className="ch-back" onClick={onBack}>← People</button>
 
       <div className="ch-profile-head">
-        <Avatar user={user} size="lg" />
+        {model ? <Avatar3D modelFile={model.file} accessoryFile={accessory?.file} size={90} /> : <Avatar user={user} size="lg" />}
         <div>
           <h2 className="ch-serif" style={{ margin: "0 0 4px 0" }}>{user.username}</h2>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

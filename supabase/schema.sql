@@ -147,3 +147,98 @@ on conflict (id) do nothing;
 create policy "anyone can view photos" on storage.objects for select using (bucket_id = 'photos');
 create policy "signed in users can upload photos" on storage.objects for insert
   with check (bucket_id = 'photos' and auth.uid() is not null);
+
+-- ============================================================
+-- FEATURE PACK 2: reactions, mentions support, friends, polls,
+-- pinned room messages, accent colors, comments on posts
+-- ============================================================
+
+alter table messages add column if not exists reactions jsonb not null default '{}'::jsonb;
+drop policy if exists "verified members can update messages" on messages;
+create policy "verified members can update messages" on messages for update
+  using (can_post_messages()) with check (can_post_messages());
+
+create table if not exists friendships (
+  id uuid primary key default gen_random_uuid(),
+  requester_id uuid not null references profiles(id) on delete cascade,
+  addressee_id uuid not null references profiles(id) on delete cascade,
+  status text not null default 'pending' check (status in ('pending','accepted')),
+  created_at timestamptz not null default now(),
+  unique (requester_id, addressee_id)
+);
+alter table friendships enable row level security;
+drop policy if exists "see own friendships" on friendships;
+create policy "see own friendships" on friendships for select
+  using (auth.uid() = requester_id or auth.uid() = addressee_id);
+drop policy if exists "send friend request" on friendships;
+create policy "send friend request" on friendships for insert with check (auth.uid() = requester_id);
+drop policy if exists "respond to friend request" on friendships;
+create policy "respond to friend request" on friendships for update
+  using (auth.uid() = addressee_id or auth.uid() = requester_id);
+drop policy if exists "remove friendship" on friendships;
+create policy "remove friendship" on friendships for delete
+  using (auth.uid() = addressee_id or auth.uid() = requester_id);
+
+create table if not exists polls (
+  id uuid primary key default gen_random_uuid(),
+  forum_id uuid not null references forums(id) on delete cascade,
+  author_id uuid not null references profiles(id) on delete cascade,
+  question text not null,
+  options jsonb not null,
+  created_at timestamptz not null default now()
+);
+alter table polls enable row level security;
+drop policy if exists "polls are publicly readable" on polls;
+create policy "polls are publicly readable" on polls for select using (true);
+drop policy if exists "verified members can post polls" on polls;
+create policy "verified members can post polls" on polls for insert
+  with check (auth.uid() = author_id and can_post_messages());
+drop policy if exists "admins can delete polls" on polls;
+create policy "admins can delete polls" on polls for delete using (is_current_user_admin());
+
+create table if not exists poll_votes (
+  poll_id uuid not null references polls(id) on delete cascade,
+  user_id uuid not null references profiles(id) on delete cascade,
+  option_id text not null,
+  created_at timestamptz not null default now(),
+  primary key (poll_id, user_id)
+);
+alter table poll_votes enable row level security;
+drop policy if exists "poll votes are publicly readable" on poll_votes;
+create policy "poll votes are publicly readable" on poll_votes for select using (true);
+drop policy if exists "signed in users can vote" on poll_votes;
+create policy "signed in users can vote" on poll_votes for insert
+  with check (auth.uid() = user_id and can_post_messages());
+drop policy if exists "users can change their vote" on poll_votes;
+create policy "users can change their vote" on poll_votes for update using (auth.uid() = user_id);
+drop policy if exists "users can remove their vote" on poll_votes;
+create policy "users can remove their vote" on poll_votes for delete using (auth.uid() = user_id);
+
+alter table forums add column if not exists pinned_message text;
+alter table profiles add column if not exists accent_color text not null default 'gold';
+
+create table if not exists post_comments (
+  id uuid primary key default gen_random_uuid(),
+  post_id uuid not null references official_posts(id) on delete cascade,
+  author_id uuid not null references profiles(id) on delete cascade,
+  body text not null,
+  created_at timestamptz not null default now()
+);
+alter table post_comments enable row level security;
+drop policy if exists "comments are publicly readable" on post_comments;
+create policy "comments are publicly readable" on post_comments for select using (true);
+drop policy if exists "verified members can comment" on post_comments;
+create policy "verified members can comment" on post_comments for insert
+  with check (auth.uid() = author_id and can_post_messages());
+drop policy if exists "admins can delete comments" on post_comments;
+create policy "admins can delete comments" on post_comments for delete using (is_current_user_admin());
+
+-- permission fix from earlier, kept here so a from-scratch rebuild never hits it again
+grant usage on schema public to anon, authenticated;
+grant all on all tables in schema public to anon, authenticated;
+grant all on all sequences in schema public to anon, authenticated;
+alter default privileges in schema public grant all on tables to anon, authenticated;
+
+-- 3D avatar model choice (Kenney CC0 mini-characters, unlocked by activity)
+alter table profiles add column if not exists avatar_model text;
+alter table profiles add column if not exists avatar_accessory text;
