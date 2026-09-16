@@ -18,6 +18,11 @@ function classifyAndRecolor(model, hairColor, clothingScheme) {
     skin: HOODIE_REFERENCE.skin,
   };
   model.traverse((child) => {
+    if (child.isMesh && !child.geometry.getAttribute("normal")) {
+      child.geometry.computeVertexNormals();
+    }
+  });
+  model.traverse((child) => {
     if (!child.isMesh) return;
     const geom = child.geometry;
     const existing = geom.getAttribute("color");
@@ -88,6 +93,11 @@ export default function Avatar3D({ modelFile, accessoryFile, stlColor = "#c9a876
       const maxDim = Math.max(size3.x, size3.y, size3.z) || 1;
       camera.position.set(0, 0, maxDim * 2.4);
       camera.lookAt(0, 0, 0);
+      // The far-clipping-plane must scale with the model -- a fixed small
+      // value clips out any model whose coordinates are larger than expected
+      // (this exact bug made an entire model invisible with no errors at all)
+      camera.far = Math.max(100, maxDim * 10);
+      camera.updateProjectionMatrix();
     }
 
     if (isStl) {
