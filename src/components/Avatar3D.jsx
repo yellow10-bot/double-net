@@ -2,12 +2,67 @@ import { useEffect, useRef } from "react";
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
+import { HOODIE_REFERENCE, HAIR_COLORS, CLOTHING_SCHEMES } from "../lib/avatarModels";
+
+function distSq(a, b) {
+  return (a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2;
+}
+
+function classifyAndRecolor(model, hairColor, clothingScheme) {
+  const scheme = CLOTHING_SCHEMES[clothingScheme] || CLOTHING_SCHEMES.normal;
+  const targets = {
+    hair: hairColor,
+    blue: scheme.blue,
+    lightblue: scheme.lightblue,
+    black: HOODIE_REFERENCE.black,
+    skin: HOODIE_REFERENCE.skin,
+  };
+  model.traverse((child) => {
+    if (!child.isMesh) return;
+    const geom = child.geometry;
+    const existing = geom.getAttribute("color");
+    if (!existing) return;
+
+    // Read whatever format the loader gave us, correctly handling whether
+    // it's a normalized integer buffer (0-255) or already float (0-1) --
+    // this exact mismatch caused the whole model to render solid black
+    // last time, so read defensively and always rebuild as plain float 0-1.
+    const isNormalizedInt = existing.normalized && existing.array.constructor !== Float32Array;
+    const readComponent = (i, fn) => {
+      const raw = fn(i);
+      return isNormalizedInt ? raw : raw * 255;
+    };
+
+    const count = existing.count;
+    const fresh = new Float32Array(count * 3);
+    for (let i = 0; i < count; i++) {
+      const c = [
+        readComponent(i, existing.getX.bind(existing)),
+        readComponent(i, existing.getY.bind(existing)),
+        readComponent(i, existing.getZ.bind(existing)),
+      ];
+      let bestKey = "blue", bestDist = Infinity;
+      for (const key of Object.keys(HOODIE_REFERENCE)) {
+        const d = distSq(c, HOODIE_REFERENCE[key]);
+        if (d < bestDist) { bestDist = d; bestKey = key; }
+      }
+      const t = targets[bestKey];
+      fresh[i*3] = t[0] / 255;
+      fresh[i*3+1] = t[1] / 255;
+      fresh[i*3+2] = t[2] / 255;
+    }
+    geom.setAttribute("color", new THREE.BufferAttribute(fresh, 3, false));
+  });
+}
 
 // Renders a character model (glTF/.glb with color, or .stl as a flat-colored
 // shape) in a small rotating 3D viewport. Falls back to nothing (parent
 // should show a circle avatar instead) if no modelFile is given.
-export default function Avatar3D({ modelFile, accessoryFile, stlColor = "#c9a876", size = 160 }) {
+// hairColor/clothingScheme only apply to models built with customizable
+// vertex-color regions (currently the "hoodie" character).
+export default function Avatar3D({ modelFile, accessoryFile, stlColor = "#c9a876", size = 160, hairColor, clothingScheme }) {
   const mountRef = useRef(null);
+  const modelRef = useRef(null);
 
   useEffect(() => {
     if (!modelFile || !mountRef.current) return undefined;
@@ -57,6 +112,11 @@ export default function Avatar3D({ modelFile, accessoryFile, stlColor = "#c9a876
         model.position.sub(center);
         group.add(model);
         frameCamera(box);
+        modelRef.current = model;
+
+        if (hairColor || clothingScheme) {
+          classifyAndRecolor(model, hairColor || HAIR_COLORS.brown, clothingScheme || "normal");
+        }
 
         if (accessoryFile) {
           loader.load(accessoryFile, (acc) => {
@@ -73,7 +133,6 @@ export default function Avatar3D({ modelFile, accessoryFile, stlColor = "#c9a876
     let raf;
     function animate() {
       raf = requestAnimationFrame(animate);
-      group.rotation.y += 0.008;
       renderer.render(scene, camera);
     }
     animate();
@@ -102,6 +161,14 @@ export default function Avatar3D({ modelFile, accessoryFile, stlColor = "#c9a876
       if (mount.contains(renderer.domElement)) mount.removeChild(renderer.domElement);
     };
   }, [modelFile, accessoryFile, size]);
+
+  // Re-apply coloring live when the person changes hair/clothing selection,
+  // without needing to reload the whole model
+  useEffect(() => {
+    if (modelRef.current && (hairColor || clothingScheme)) {
+      classifyAndRecolor(modelRef.current, hairColor || HAIR_COLORS.brown, clothingScheme || "normal");
+    }
+  }, [hairColor, clothingScheme]);
 
   if (!modelFile) return null;
   return <div ref={mountRef} style={{ width: size, height: size, margin: "0 auto" }} />;
