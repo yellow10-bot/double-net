@@ -23,23 +23,21 @@ function classifyAndRecolor(model, hairColor, clothingScheme) {
     const existing = geom.getAttribute("color");
     if (!existing) return;
 
-    // Read whatever format the loader gave us, correctly handling whether
-    // it's a normalized integer buffer (0-255) or already float (0-1) --
-    // this exact mismatch caused the whole model to render solid black
-    // last time, so read defensively and always rebuild as plain float 0-1.
-    const isNormalizedInt = existing.normalized && existing.array.constructor !== Float32Array;
-    const readComponent = (i, fn) => {
-      const raw = fn(i);
-      return isNormalizedInt ? raw : raw * 255;
-    };
+    // What actually determines the value range is the underlying typed
+    // array: an integer array (Uint8Array etc.) always holds raw 0-255
+    // values regardless of the "normalized" flag; only a real Float32Array
+    // holds 0-1 values. Getting this backwards last time made every color
+    // come out wrong (likely solid black).
+    const isFloatArray = existing.array instanceof Float32Array;
+    const scaleUp = isFloatArray ? 255 : 1;
 
     const count = existing.count;
     const fresh = new Float32Array(count * 3);
     for (let i = 0; i < count; i++) {
       const c = [
-        readComponent(i, existing.getX.bind(existing)),
-        readComponent(i, existing.getY.bind(existing)),
-        readComponent(i, existing.getZ.bind(existing)),
+        existing.getX(i) * scaleUp,
+        existing.getY(i) * scaleUp,
+        existing.getZ(i) * scaleUp,
       ];
       let bestKey = "blue", bestDist = Infinity;
       for (const key of Object.keys(HOODIE_REFERENCE)) {
@@ -52,6 +50,7 @@ function classifyAndRecolor(model, hairColor, clothingScheme) {
       fresh[i*3+2] = t[2] / 255;
     }
     geom.setAttribute("color", new THREE.BufferAttribute(fresh, 3, false));
+    if (child.material) child.material.vertexColors = true;
   });
 }
 
